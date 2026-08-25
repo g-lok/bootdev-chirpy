@@ -1,3 +1,3 @@
 # bootdev-chirpy
 
-boot.dev http servers "chirpy" project
+[boot.dev](https://boot.dev) http servers "chirpy" project
