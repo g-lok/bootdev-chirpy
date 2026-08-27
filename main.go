@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"sync/atomic"
+	"unicode"
 )
 
 type apiConfig struct {
@@ -17,6 +19,40 @@ func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 		cfg.fileserverHits.Add(1)
 		next.ServeHTTP(w, req)
 	})
+}
+
+func censorWord(text string) string {
+	words := []string{"kerfuffle", "fornax", "sharbert"}
+
+	wordSet := make(map[string]bool, len(words))
+	for _, w := range words {
+		wordSet[strings.ToLower(w)] = true
+	}
+
+	runes := []rune(text)
+	var sb strings.Builder
+	i := 0
+	for i < len(runes) {
+		if !unicode.IsLetter(runes[i]) && !unicode.IsDigit(runes[i]) {
+			sb.WriteRune(runes[i])
+			i++
+			continue
+		}
+
+		start := i
+		for i < len(runes) && (unicode.IsLetter(runes[i]) || unicode.IsDigit(runes[i])) {
+			i++
+		}
+		word := string(runes[start:i])
+		followedByPunct := i < len(runes) && unicode.IsPunct(runes[i])
+
+		if !followedByPunct && wordSet[strings.ToLower(word)] {
+			sb.WriteString("****")
+			continue
+		}
+		sb.WriteString(word)
+	}
+	return sb.String()
 }
 
 func (cfg *apiConfig) getVisits(w http.ResponseWriter, req *http.Request) {
@@ -57,7 +93,7 @@ func validateChirps(w http.ResponseWriter, req *http.Request) {
 	}
 
 	type validJson struct {
-		Valid bool `json:"valid"`
+		CensoredSpeech string `json:"cleaned_body"`
 	}
 
 	decoder := json.NewDecoder(req.Body)
@@ -102,7 +138,7 @@ func validateChirps(w http.ResponseWriter, req *http.Request) {
 	}
 
 	respBody := validJson{
-		Valid: true,
+		CensoredSpeech: censorWord(params.Body),
 	}
 	data, err := json.Marshal(respBody)
 	if err != nil {
