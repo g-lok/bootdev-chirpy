@@ -1,17 +1,24 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"sync/atomic"
 	"unicode"
+
+	"github.com/g-lok/bootdev-chirpy/internal/database"
+	_ "github.com/lib/pq"
+	"github.com/lmittmann/tint"
 )
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
+	dbQueries      *database.Queries
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -100,14 +107,14 @@ func validateChirps(w http.ResponseWriter, req *http.Request) {
 	params := parameters{}
 	err := decoder.Decode(&params)
 	if err != nil {
-		log.Printf("Error decoding parameters: %s", err)
+		slog.Error("error decoding parameters", "error", err)
 		respBody := errJson{
 			Error: fmt.Sprintf("Error decoding parameters: %s", err),
 		}
 
 		data, err := json.Marshal(respBody)
 		if err != nil {
-			log.Printf("error marshalling data: %s", err)
+			slog.Error("error marshalling data", "error", err)
 			w.WriteHeader(500)
 		}
 
@@ -124,7 +131,7 @@ func validateChirps(w http.ResponseWriter, req *http.Request) {
 
 		data, err := json.Marshal(respBody)
 		if err != nil {
-			log.Printf("error marshalling data: %s", err)
+			slog.Error("error marshalling data", "error", err)
 			w.WriteHeader(500)
 			w.Header().Set("Content-Type", "application/json")
 			w.Write(data)
@@ -142,7 +149,7 @@ func validateChirps(w http.ResponseWriter, req *http.Request) {
 	}
 	data, err := json.Marshal(respBody)
 	if err != nil {
-		log.Printf("error marshalling data: %s", err)
+		slog.Error("error marshalling data", "error", err)
 
 		w.WriteHeader(500)
 		w.Header().Set("Content-Type", "application/json")
@@ -157,7 +164,22 @@ func validateChirps(w http.ResponseWriter, req *http.Request) {
 }
 
 func main() {
+	w := os.Stderr
+	logger := slog.New(tint.NewTextHandler(w, nil))
+	slog.SetDefault(logger)
+
+	dbURL := os.Getenv("DB_URL")
+	db, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		logger.Error("failed to open db", "error", err, "table", "chirpy")
+		os.Exit(1)
+	}
+
+	dbQueries := database.New(db)
+
 	var apiCfg apiConfig
+	apiCfg.dbQueries = dbQueries
+
 	mux := http.NewServeMux()
 	fs := http.FileServer(http.Dir("./static"))
 	fsClean := http.StripPrefix("/app/", fs)
@@ -172,9 +194,9 @@ func main() {
 		Handler: mux,
 	}
 
-	log.Println("Starting server on port 8080...")
-	err := server.ListenAndServe()
+	logger.Info("Starting chirpy server", "port", 8080)
+	err = server.ListenAndServe()
 	if err != nil {
-		log.Fatal(err)
+		logger.Error("failed to start server", "error", err)
 	}
 }
