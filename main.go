@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -46,15 +47,89 @@ func healthz(w http.ResponseWriter, req *http.Request) {
 	w.Write([]byte("OK"))
 }
 
+func validateChirps(w http.ResponseWriter, req *http.Request) {
+	type parameters struct {
+		Body string `json:"body"`
+	}
+
+	type errJson struct {
+		Error string `json:"error"`
+	}
+
+	type validJson struct {
+		Valid bool `json:"valid"`
+	}
+
+	decoder := json.NewDecoder(req.Body)
+	params := parameters{}
+	err := decoder.Decode(&params)
+	if err != nil {
+		log.Printf("Error decoding parameters: %s", err)
+		respBody := errJson{
+			Error: fmt.Sprintf("Error decoding parameters: %s", err),
+		}
+
+		data, err := json.Marshal(respBody)
+		if err != nil {
+			log.Printf("error marshalling data: %s", err)
+			w.WriteHeader(500)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(500)
+		w.Write(data)
+		return
+	}
+
+	if len(params.Body) > 140 {
+		respBody := errJson{
+			Error: "Cannot accept Chirps > 140 chars",
+		}
+
+		data, err := json.Marshal(respBody)
+		if err != nil {
+			log.Printf("error marshalling data: %s", err)
+			w.WriteHeader(500)
+			w.Header().Set("Content-Type", "application/json")
+			w.Write(data)
+			return
+		}
+
+		w.WriteHeader(400)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(data)
+		return
+	}
+
+	respBody := validJson{
+		Valid: true,
+	}
+	data, err := json.Marshal(respBody)
+	if err != nil {
+		log.Printf("error marshalling data: %s", err)
+
+		w.WriteHeader(500)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(500)
+		w.Write(data)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	w.Write(data)
+}
+
 func main() {
 	var apiCfg apiConfig
 	mux := http.NewServeMux()
 	fs := http.FileServer(http.Dir("./static"))
 	fsClean := http.StripPrefix("/app/", fs)
 	mux.Handle("/app/", apiCfg.middlewareMetricsInc(fsClean))
-	mux.HandleFunc("GET /api/healthz", healthz)
 	mux.HandleFunc("GET /admin/metrics", apiCfg.getVisits)
 	mux.HandleFunc("POST /admin/reset", apiCfg.resetVisits)
+	mux.HandleFunc("GET /api/healthz", healthz)
+	mux.HandleFunc("POST /api/validate_chirp", validateChirps)
 
 	server := &http.Server{
 		Addr:    ":8080",
