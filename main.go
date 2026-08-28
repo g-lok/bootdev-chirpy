@@ -30,6 +30,32 @@ func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 	})
 }
 
+func simpleError(errMsg string, code int, w http.ResponseWriter) {
+	slog.Error(errMsg)
+	w.WriteHeader(code)
+}
+
+func apiError(logMsg string, apiMsg string, err error, code int, w http.ResponseWriter) {
+	type errJSON struct {
+		Error string `json:"error"`
+	}
+
+	slog.Error(logMsg, "error", err)
+	respBody := errJSON{
+		Error: fmt.Sprintf(apiMsg, err),
+	}
+
+	data, err := json.Marshal(respBody)
+	if err != nil {
+		slog.Error("error marshalling data", "error", err)
+		w.WriteHeader(500)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	w.Write(data)
+}
+
 func censorWord(text string) string {
 	words := []string{"kerfuffle", "fornax", "sharbert"}
 
@@ -80,13 +106,8 @@ func (cfg *apiConfig) getVisits(w http.ResponseWriter, req *http.Request) {
 }
 
 func (cfg *apiConfig) reset(w http.ResponseWriter, req *http.Request) {
-	type errJSON struct {
-		Error string `json:"error"`
-	}
-
 	if cfg.platform != "dev" {
-		slog.Error("forbidden: platform env is not dev")
-		w.WriteHeader(403)
+		simpleError("forbidden: platform env is not dev", 403, w)
 		return
 	}
 
@@ -94,21 +115,8 @@ func (cfg *apiConfig) reset(w http.ResponseWriter, req *http.Request) {
 
 	err := cfg.db.DeleteUsers(ctx)
 	if err != nil {
-		slog.Error("error deleting all uesrs", "error", err)
-
-		respBody := errJSON{
-			Error: fmt.Sprintf("Error dropping all users from db: %v", err),
-		}
-
-		data, err := json.Marshal(respBody)
-		if err != nil {
-			slog.Error("error marshalling data", "error", err)
-			w.WriteHeader(500)
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(500)
-		w.Write(data)
+		apiMsg := "Error dropping all users from db"
+		apiError("error deleting all uesrs", apiMsg, err, 500, w)
 		return
 	}
 
@@ -132,10 +140,6 @@ func (cfg *apiConfig) postUsers(w http.ResponseWriter, req *http.Request) {
 		Email string `json:"email"`
 	}
 
-	type errJSON struct {
-		Error string `json:"error"`
-	}
-
 	type okJson struct {
 		Id        string `json:"id"`
 		CreatedAt string `json:"created_at"`
@@ -147,74 +151,24 @@ func (cfg *apiConfig) postUsers(w http.ResponseWriter, req *http.Request) {
 	params := parameters{}
 	err := decoder.Decode(&params)
 	if err != nil {
-		slog.Error("error decoding parameters", "error", err)
-		respBody := errJSON{
-			Error: fmt.Sprintf("Error decoding parameters: %s", err),
-		}
-
-		data, err := json.Marshal(respBody)
-		if err != nil {
-			slog.Error("error marshalling data", "error", err)
-			w.WriteHeader(500)
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(500)
-		w.Write(data)
+		apiError("error decoding parameters", "Error decoding JSON parameter", err, 500, w)
 		return
 	}
 
 	userExists, err := db.UserExists(ctx, params.Email)
 	if err != nil {
-		slog.Error("error checking if user exists", "error", err)
-		respBody := errJSON{
-			Error: fmt.Sprint("Error reading from db"),
-		}
-
-		data, err := json.Marshal(respBody)
-		if err != nil {
-			slog.Error("error marshalling data", "error", err)
-			w.WriteHeader(500)
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(500)
-		w.Write(data)
+		apiError("error checking if user exists", "Error check user table", err, 500, w)
 		return
 	}
 
 	if userExists {
-		slog.Error("user with email already exists", "email", params.Email)
-		respBody := errJSON{
-			Error: fmt.Sprintf("User with email %s already exists", params.Email),
-		}
-		data, err := json.Marshal(respBody)
-		if err != nil {
-			slog.Error("error marshalling data", "error", err)
-			w.WriteHeader(500)
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(500)
-		w.Write(data)
+		apiError("user with email already exists", "User alredy exists", err, 500, w)
 		return
 	}
 
 	usr, err := db.CreateUser(ctx, params.Email)
 	if err != nil {
-		slog.Error("error addiing new user", "error", err)
-		respBody := errJSON{
-			Error: fmt.Sprint("failed to add new user"),
-		}
-		data, err := json.Marshal(respBody)
-		if err != nil {
-			slog.Error("error marshalling data", "error", err)
-			w.WriteHeader(500)
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(500)
-		w.Write(data)
+		apiError("error addiing new user", "Error adding new user", err, 500, w)
 		return
 	}
 
@@ -227,12 +181,7 @@ func (cfg *apiConfig) postUsers(w http.ResponseWriter, req *http.Request) {
 
 	data, err := json.Marshal(respBody)
 	if err != nil {
-		slog.Error("error marshalling data", "error", err)
-
-		w.WriteHeader(500)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(500)
-		w.Write(data)
+		apiError("error marshalling data", "Error encoding JSON", err, 500, w)
 		return
 	}
 
@@ -246,10 +195,6 @@ func validateChirps(w http.ResponseWriter, req *http.Request) {
 		Body string `json:"body"`
 	}
 
-	type errJson struct {
-		Error string `json:"error"`
-	}
-
 	type validJson struct {
 		CensoredSpeech string `json:"cleaned_body"`
 	}
@@ -258,40 +203,12 @@ func validateChirps(w http.ResponseWriter, req *http.Request) {
 	params := parameters{}
 	err := decoder.Decode(&params)
 	if err != nil {
-		slog.Error("error decoding parameters", "error", err)
-		respBody := errJson{
-			Error: fmt.Sprintf("Error decoding parameters: %s", err),
-		}
-
-		data, err := json.Marshal(respBody)
-		if err != nil {
-			slog.Error("error marshalling data", "error", err)
-			w.WriteHeader(500)
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(500)
-		w.Write(data)
+		apiError("error decoding parameters", "Error decoding JSON", err, 500, w)
 		return
 	}
 
 	if len(params.Body) > 140 {
-		respBody := errJson{
-			Error: "Cannot accept Chirps > 140 chars",
-		}
-
-		data, err := json.Marshal(respBody)
-		if err != nil {
-			slog.Error("error marshalling data", "error", err)
-			w.WriteHeader(500)
-			w.Header().Set("Content-Type", "application/json")
-			w.Write(data)
-			return
-		}
-
-		w.WriteHeader(400)
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(data)
+		apiError("chirp > 140 chars", "Cannot create chirps > 140chars", err, 500, w)
 		return
 	}
 
@@ -300,12 +217,7 @@ func validateChirps(w http.ResponseWriter, req *http.Request) {
 	}
 	data, err := json.Marshal(respBody)
 	if err != nil {
-		slog.Error("error marshalling data", "error", err)
-
-		w.WriteHeader(500)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(500)
-		w.Write(data)
+		apiError("error marshalling data", "Error encoding JSON", err, 500, w)
 		return
 	}
 
