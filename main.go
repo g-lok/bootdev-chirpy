@@ -12,13 +12,15 @@ import (
 	"unicode"
 
 	"github.com/g-lok/bootdev-chirpy/internal/database"
+	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 	"github.com/lmittmann/tint"
 )
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
-	dbQueries      *database.Queries
+	db             *database.Queries
+	platform       string
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -77,17 +79,166 @@ func (cfg *apiConfig) getVisits(w http.ResponseWriter, req *http.Request) {
 	w.Write([]byte(hits))
 }
 
-func (cfg *apiConfig) resetVisits(w http.ResponseWriter, req *http.Request) {
+func (cfg *apiConfig) reset(w http.ResponseWriter, req *http.Request) {
+	type errJSON struct {
+		Error string `json:"error"`
+	}
+
+	if cfg.platform != "dev" {
+		slog.Error("forbidden: platform env is not dev")
+		w.WriteHeader(403)
+		return
+	}
+
+	ctx := req.Context()
+
+	err := cfg.db.DeleteUsers(ctx)
+	if err != nil {
+		slog.Error("error deleting all uesrs", "error", err)
+
+		respBody := errJSON{
+			Error: fmt.Sprintf("Error dropping all users from db: %v", err),
+		}
+
+		data, err := json.Marshal(respBody)
+		if err != nil {
+			slog.Error("error marshalling data", "error", err)
+			w.WriteHeader(500)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(500)
+		w.Write(data)
+		return
+	}
+
 	cfg.fileserverHits.Store(0)
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("Visits counter reset"))
+	w.Write([]byte("Visits counter and users table reset"))
 }
 
 func healthz(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("OK"))
+}
+
+func (cfg *apiConfig) postUsers(w http.ResponseWriter, req *http.Request) {
+	ctx := req.Context()
+	db := cfg.db
+
+	type parameters struct {
+		Email string `json:"email"`
+	}
+
+	type errJSON struct {
+		Error string `json:"error"`
+	}
+
+	type okJson struct {
+		Id        string `json:"id"`
+		CreatedAt string `json:"created_at"`
+		UpdatedAt string `json:"updated_at"`
+		Email     string `json:"email"`
+	}
+
+	decoder := json.NewDecoder(req.Body)
+	params := parameters{}
+	err := decoder.Decode(&params)
+	if err != nil {
+		slog.Error("error decoding parameters", "error", err)
+		respBody := errJSON{
+			Error: fmt.Sprintf("Error decoding parameters: %s", err),
+		}
+
+		data, err := json.Marshal(respBody)
+		if err != nil {
+			slog.Error("error marshalling data", "error", err)
+			w.WriteHeader(500)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(500)
+		w.Write(data)
+		return
+	}
+
+	userExists, err := db.UserExists(ctx, params.Email)
+	if err != nil {
+		slog.Error("error checking if user exists", "error", err)
+		respBody := errJSON{
+			Error: fmt.Sprint("Error reading from db"),
+		}
+
+		data, err := json.Marshal(respBody)
+		if err != nil {
+			slog.Error("error marshalling data", "error", err)
+			w.WriteHeader(500)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(500)
+		w.Write(data)
+		return
+	}
+
+	if userExists {
+		slog.Error("user with email already exists", "email", params.Email)
+		respBody := errJSON{
+			Error: fmt.Sprintf("User with email %s already exists", params.Email),
+		}
+		data, err := json.Marshal(respBody)
+		if err != nil {
+			slog.Error("error marshalling data", "error", err)
+			w.WriteHeader(500)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(500)
+		w.Write(data)
+		return
+	}
+
+	usr, err := db.CreateUser(ctx, params.Email)
+	if err != nil {
+		slog.Error("error addiing new user", "error", err)
+		respBody := errJSON{
+			Error: fmt.Sprint("failed to add new user"),
+		}
+		data, err := json.Marshal(respBody)
+		if err != nil {
+			slog.Error("error marshalling data", "error", err)
+			w.WriteHeader(500)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(500)
+		w.Write(data)
+		return
+	}
+
+	respBody := okJson{
+		Id:        usr.ID.String(),
+		CreatedAt: usr.CreatedAt.String(),
+		UpdatedAt: usr.UpdatedAt.String(),
+		Email:     usr.Email,
+	}
+
+	data, err := json.Marshal(respBody)
+	if err != nil {
+		slog.Error("error marshalling data", "error", err)
+
+		w.WriteHeader(500)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(500)
+		w.Write(data)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(201)
+	w.Write(data)
 }
 
 func validateChirps(w http.ResponseWriter, req *http.Request) {
@@ -168,6 +319,7 @@ func main() {
 	logger := slog.New(tint.NewTextHandler(w, nil))
 	slog.SetDefault(logger)
 
+	godotenv.Load()
 	dbURL := os.Getenv("DB_URL")
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
@@ -178,15 +330,17 @@ func main() {
 	dbQueries := database.New(db)
 
 	var apiCfg apiConfig
-	apiCfg.dbQueries = dbQueries
+	apiCfg.db = dbQueries
+	apiCfg.platform = os.Getenv("PLATFORM")
 
 	mux := http.NewServeMux()
 	fs := http.FileServer(http.Dir("./static"))
 	fsClean := http.StripPrefix("/app/", fs)
 	mux.Handle("/app/", apiCfg.middlewareMetricsInc(fsClean))
 	mux.HandleFunc("GET /admin/metrics", apiCfg.getVisits)
-	mux.HandleFunc("POST /admin/reset", apiCfg.resetVisits)
+	mux.HandleFunc("POST /admin/reset", apiCfg.reset)
 	mux.HandleFunc("GET /api/healthz", healthz)
+	mux.HandleFunc("POST /api/users", apiCfg.postUsers)
 	mux.HandleFunc("POST /api/validate_chirp", validateChirps)
 
 	server := &http.Server{
