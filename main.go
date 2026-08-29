@@ -23,6 +23,18 @@ type apiConfig struct {
 	platform       string
 }
 
+func sendJson[T any](code int, w http.ResponseWriter, payload T) {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		apiError("error marshalling data", "Error encoding JSON", err, 500, w)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	w.Write(data)
+}
+
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		cfg.fileserverHits.Add(1)
@@ -45,15 +57,7 @@ func apiError(logMsg string, apiMsg string, err error, code int, w http.Response
 		Error: fmt.Sprintf(apiMsg, err),
 	}
 
-	data, err := json.Marshal(respBody)
-	if err != nil {
-		slog.Error("error marshalling data", "error", err)
-		w.WriteHeader(500)
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	w.Write(data)
+	sendJson(code, w, respBody)
 }
 
 func censorWord(text string) string {
@@ -151,24 +155,24 @@ func (cfg *apiConfig) postUsers(w http.ResponseWriter, req *http.Request) {
 	params := parameters{}
 	err := decoder.Decode(&params)
 	if err != nil {
-		apiError("error decoding parameters", "Error decoding JSON parameter", err, 500, w)
+		apiError("error decoding parameters", "Error decoding JSON parameter", err, http.StatusInternalServerError, w)
 		return
 	}
 
 	userExists, err := db.UserExists(ctx, params.Email)
 	if err != nil {
-		apiError("error checking if user exists", "Error check user table", err, 500, w)
+		apiError("error checking if user exists", "Error checking user table", err, http.StatusInternalServerError, w)
 		return
 	}
 
 	if userExists {
-		apiError("user with email already exists", "User alredy exists", err, 500, w)
+		apiError("user with email already exists", "User alredy exists", err, http.StatusInternalServerError, w)
 		return
 	}
 
 	usr, err := db.CreateUser(ctx, params.Email)
 	if err != nil {
-		apiError("error addiing new user", "Error adding new user", err, 500, w)
+		apiError("error addiing new user", "Error adding new user", err, http.StatusInternalServerError, w)
 		return
 	}
 
@@ -179,15 +183,7 @@ func (cfg *apiConfig) postUsers(w http.ResponseWriter, req *http.Request) {
 		Email:     usr.Email,
 	}
 
-	data, err := json.Marshal(respBody)
-	if err != nil {
-		apiError("error marshalling data", "Error encoding JSON", err, 500, w)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(201)
-	w.Write(data)
+	sendJson(http.StatusCreated, w, respBody)
 }
 
 func validateChirps(w http.ResponseWriter, req *http.Request) {
@@ -195,7 +191,7 @@ func validateChirps(w http.ResponseWriter, req *http.Request) {
 		Body string `json:"body"`
 	}
 
-	type validJson struct {
+	type okJSON struct {
 		CensoredSpeech string `json:"cleaned_body"`
 	}
 
@@ -203,27 +199,20 @@ func validateChirps(w http.ResponseWriter, req *http.Request) {
 	params := parameters{}
 	err := decoder.Decode(&params)
 	if err != nil {
-		apiError("error decoding parameters", "Error decoding JSON", err, 500, w)
+		apiError("error decoding parameters", "Error decoding JSON", err, http.StatusInternalServerError, w)
 		return
 	}
 
 	if len(params.Body) > 140 {
-		apiError("chirp > 140 chars", "Cannot create chirps > 140chars", err, 500, w)
+		apiError("chirp > 140 chars", "Cannot create chirps > 140chars", err, http.StatusNotAcceptable, w)
 		return
 	}
 
-	respBody := validJson{
+	respBody := okJSON{
 		CensoredSpeech: censorWord(params.Body),
 	}
-	data, err := json.Marshal(respBody)
-	if err != nil {
-		apiError("error marshalling data", "Error encoding JSON", err, 500, w)
-		return
-	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(200)
-	w.Write(data)
+	sendJson(http.StatusCreated, w, respBody)
 }
 
 func main() {
