@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -12,10 +13,13 @@ import (
 	"unicode"
 
 	"github.com/g-lok/bootdev-chirpy/internal/database"
+	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 	"github.com/lmittmann/tint"
 )
+
+const maxChirpLen int = 140
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
@@ -23,7 +27,7 @@ type apiConfig struct {
 	platform       string
 }
 
-func sendJson[T any](code int, w http.ResponseWriter, payload T) {
+func sendJSON[T any](code int, w http.ResponseWriter, payload T) {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		apiError("error marshalling data", "Error encoding JSON", err, 500, w)
@@ -57,7 +61,7 @@ func apiError(logMsg string, apiMsg string, err error, code int, w http.Response
 		Error: fmt.Sprintf(apiMsg, err),
 	}
 
-	sendJson(code, w, respBody)
+	sendJSON(code, w, respBody)
 }
 
 func censorWord(text string) string {
@@ -144,7 +148,7 @@ func (cfg *apiConfig) postUsers(w http.ResponseWriter, req *http.Request) {
 		Email string `json:"email"`
 	}
 
-	type okJson struct {
+	type okJSON struct {
 		Id        string `json:"id"`
 		CreatedAt string `json:"created_at"`
 		UpdatedAt string `json:"updated_at"`
@@ -172,27 +176,35 @@ func (cfg *apiConfig) postUsers(w http.ResponseWriter, req *http.Request) {
 
 	usr, err := db.CreateUser(ctx, params.Email)
 	if err != nil {
-		apiError("error addiing new user", "Error adding new user", err, http.StatusInternalServerError, w)
+		apiError("error adding new user", "Error adding new user", err, http.StatusInternalServerError, w)
 		return
 	}
 
-	respBody := okJson{
+	respBody := okJSON{
 		Id:        usr.ID.String(),
 		CreatedAt: usr.CreatedAt.String(),
 		UpdatedAt: usr.UpdatedAt.String(),
 		Email:     usr.Email,
 	}
 
-	sendJson(http.StatusCreated, w, respBody)
+	sendJSON(http.StatusCreated, w, respBody)
 }
 
-func validateChirps(w http.ResponseWriter, req *http.Request) {
+func (cfg *apiConfig) postChirps(w http.ResponseWriter, req *http.Request) {
+	ctx := req.Context()
+	db := cfg.db
+
 	type parameters struct {
-		Body string `json:"body"`
+		Body   string `json:"body"`
+		UserID string `json:"user_id"`
 	}
 
 	type okJSON struct {
-		CensoredSpeech string `json:"cleaned_body"`
+		Id        string `json:"id"`
+		CreatedAt string `json:"created_at"`
+		UpdatedAt string `json:"updated_at"`
+		Body      string `json:"body"`
+		UserID    string `json:"user_id"`
 	}
 
 	decoder := json.NewDecoder(req.Body)
@@ -203,16 +215,40 @@ func validateChirps(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	if len(params.Body) > 140 {
-		apiError("chirp > 140 chars", "Cannot create chirps > 140chars", err, http.StatusNotAcceptable, w)
+	userID, err := uuid.Parse(params.UserID)
+	if err != nil {
+		apiError("invalid user UUID", "Invalid user_id: not a UUID", err, http.StatusBadRequest, w)
+		return
+	}
+
+	if len(params.Body) > maxChirpLen {
+		err := errors.New("cannot create chirp > 140 chars")
+		apiError("chirp > 140 chars", "Cannot create chirps > 140chars", err, http.StatusUnprocessableEntity, w)
+		return
+	}
+
+	params.Body = censorWord(params.Body)
+
+	chirpParams := database.CreateChirpParams{
+		Body:   params.Body,
+		UserID: userID,
+	}
+
+	chirp, err := db.CreateChirp(ctx, chirpParams)
+	if err != nil {
+		apiError("error creating new chirp", "Error adding new chirp", err, http.StatusInternalServerError, w)
 		return
 	}
 
 	respBody := okJSON{
-		CensoredSpeech: censorWord(params.Body),
+		Id:        chirp.ID.String(),
+		CreatedAt: chirp.CreatedAt.String(),
+		UpdatedAt: chirp.UpdatedAt.String(),
+		Body:      chirp.Body,
+		UserID:    chirp.UserID.String(),
 	}
 
-	sendJson(http.StatusCreated, w, respBody)
+	sendJSON(http.StatusCreated, w, respBody)
 }
 
 func main() {
@@ -242,7 +278,7 @@ func main() {
 	mux.HandleFunc("POST /admin/reset", apiCfg.reset)
 	mux.HandleFunc("GET /api/healthz", healthz)
 	mux.HandleFunc("POST /api/users", apiCfg.postUsers)
-	mux.HandleFunc("POST /api/validate_chirp", validateChirps)
+	mux.HandleFunc("POST /api/chirps", apiCfg.postChirps)
 
 	server := &http.Server{
 		Addr:    ":8080",
