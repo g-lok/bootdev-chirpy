@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"sync/atomic"
+	"time"
 	"unicode"
 
 	"github.com/g-lok/bootdev-chirpy/internal/auth"
@@ -26,6 +27,7 @@ type apiConfig struct {
 	fileserverHits atomic.Int32
 	db             *database.Queries
 	platform       string
+	secret         string
 }
 
 func sendJSON[T any](code int, w http.ResponseWriter, payload T) {
@@ -209,8 +211,9 @@ func (cfg *apiConfig) postLogin(w http.ResponseWriter, req *http.Request) {
 	db := cfg.db
 
 	type parameters struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
+		Email            string `json:"email"`
+		Password         string `json:"password"`
+		ExpiresInSeconds *int   `json:"expires_in_seconds,omitempty"`
 	}
 
 	type okJSON struct {
@@ -218,6 +221,7 @@ func (cfg *apiConfig) postLogin(w http.ResponseWriter, req *http.Request) {
 		CreatedAt string `json:"created_at"`
 		UpdatedAt string `json:"updated_at"`
 		Email     string `json:"email"`
+		Token     string `json:"token"`
 	}
 
 	decoder := json.NewDecoder(req.Body)
@@ -227,6 +231,15 @@ func (cfg *apiConfig) postLogin(w http.ResponseWriter, req *http.Request) {
 		apiError("error decoding parameters", "Error decoding JSON parameter", err, http.StatusInternalServerError, w)
 		return
 	}
+
+	var expiration int
+	if params.ExpiresInSeconds != nil && *params.ExpiresInSeconds <= 3600 {
+		expiration = *params.ExpiresInSeconds
+	} else {
+		expiration = 3600
+	}
+
+	expirationDuration := time.Second * time.Duration(expiration)
 
 	usr, err := db.GetUserByEmail(ctx, params.Email)
 	if err != nil {
@@ -241,17 +254,30 @@ func (cfg *apiConfig) postLogin(w http.ResponseWriter, req *http.Request) {
 	}
 
 	if checkPassword {
+		token, err := auth.MakeJWT(usr.ID, cfg.secret, expirationDuration)
+		if err != nil {
+			apiError("failed to create jwt token", "Failed to generate JWT token", err, http.StatusInternalServerError, w)
+			return
+		}
+
+		userID, err := auth.ValidateJWT(token, cfg.secret)
+		if err != nil {
+			apiError("failed JWT validation", "Failed JWT validation", err, http.StatusUnauthorized, w)
+			return
+		}
+
 		respBody := okJSON{
-			Id:        usr.ID.String(),
+			Id:        userID.String(),
 			CreatedAt: usr.CreatedAt.String(),
 			UpdatedAt: usr.UpdatedAt.String(),
 			Email:     usr.Email,
+			Token:     token,
 		}
 
 		sendJSON(http.StatusOK, w, respBody)
 	} else {
-		err = errors.New("failed password authentication")
-		apiError("wrong password", "Wrong password", err, http.StatusUnauthorized, w)
+		err = errors.New("failed authentication")
+		apiError("authentication failed", "Authentication failed", err, http.StatusUnauthorized, w)
 	}
 }
 
@@ -260,8 +286,7 @@ func (cfg *apiConfig) postChirps(w http.ResponseWriter, req *http.Request) {
 	db := cfg.db
 
 	type parameters struct {
-		Body   string `json:"body"`
-		UserID string `json:"user_id"`
+		Body string `json:"body"`
 	}
 
 	type okJSON struct {
@@ -280,15 +305,21 @@ func (cfg *apiConfig) postChirps(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	userID, err := uuid.Parse(params.UserID)
+	bearerToken, err := auth.GetBearerToken(req.Header)
 	if err != nil {
-		apiError("invalid user UUID", "Invalid user_id: not a UUID", err, http.StatusBadRequest, w)
+		apiError("failed to get bearer token", "Failed to get bearer token", err, http.StatusInternalServerError, w)
+		return
+	}
+
+	userID, err := auth.ValidateJWT(bearerToken, cfg.secret)
+	if err != nil {
+		apiError("failed to authorize bearer token", "Failed authentication", err, http.StatusUnauthorized, w)
 		return
 	}
 
 	if len(params.Body) > maxChirpLen {
-		err := errors.New("cannot create chirp > 140 chars")
-		apiError("chirp > 140 chars", "Cannot create chirps > 140chars", err, http.StatusUnprocessableEntity, w)
+		errMsg := errors.New("cannot create chirp > 140 chars")
+		apiError("chirp > 140 chars", "Cannot create chirps > 140chars", errMsg, http.StatusUnprocessableEntity, w)
 		return
 	}
 
@@ -408,6 +439,7 @@ func main() {
 	var apiCfg apiConfig
 	apiCfg.db = dbQueries
 	apiCfg.platform = os.Getenv("PLATFORM")
+	apiCfg.secret = os.Getenv("SECRET")
 
 	mux := http.NewServeMux()
 	fs := http.FileServer(http.Dir("./static"))
