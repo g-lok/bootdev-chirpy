@@ -211,17 +211,17 @@ func (cfg *apiConfig) postLogin(w http.ResponseWriter, req *http.Request) {
 	db := cfg.db
 
 	type parameters struct {
-		Email            string `json:"email"`
-		Password         string `json:"password"`
-		ExpiresInSeconds *int   `json:"expires_in_seconds,omitempty"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
 	}
 
 	type okJSON struct {
-		Id        string `json:"id"`
-		CreatedAt string `json:"created_at"`
-		UpdatedAt string `json:"updated_at"`
-		Email     string `json:"email"`
-		Token     string `json:"token"`
+		ID           string `json:"id"`
+		CreatedAt    string `json:"created_at"`
+		UpdatedAt    string `json:"updated_at"`
+		Email        string `json:"email"`
+		Token        string `json:"token"`
+		RefreshToken string `json:"refresh_token"`
 	}
 
 	decoder := json.NewDecoder(req.Body)
@@ -232,14 +232,9 @@ func (cfg *apiConfig) postLogin(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	var expiration int
-	if params.ExpiresInSeconds != nil && *params.ExpiresInSeconds <= 3600 {
-		expiration = *params.ExpiresInSeconds
-	} else {
-		expiration = 3600
-	}
-
-	expirationDuration := time.Second * time.Duration(expiration)
+	refreshTokenExpirationDuration := time.Hour * 24 * 60
+	jwtExpiration := 3600
+	jwtExpirationDuration := time.Second * time.Duration(jwtExpiration)
 
 	usr, err := db.GetUserByEmail(ctx, params.Email)
 	if err != nil {
@@ -254,7 +249,7 @@ func (cfg *apiConfig) postLogin(w http.ResponseWriter, req *http.Request) {
 	}
 
 	if checkPassword {
-		token, err := auth.MakeJWT(usr.ID, cfg.secret, expirationDuration)
+		token, err := auth.MakeJWT(usr.ID, cfg.secret, jwtExpirationDuration)
 		if err != nil {
 			apiError("failed to create jwt token", "Failed to generate JWT token", err, http.StatusInternalServerError, w)
 			return
@@ -266,12 +261,25 @@ func (cfg *apiConfig) postLogin(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 
+		refreshToken := auth.MakeRefreshToken()
+		refreshTokenParams := database.CreateRefreshTokenParams{
+			Token:     refreshToken,
+			UserID:    userID,
+			ExpiresAt: time.Now().Add(refreshTokenExpirationDuration),
+		}
+		_, err = db.CreateRefreshToken(ctx, refreshTokenParams)
+		if err != nil {
+			apiError("failed to generate refresh token", "Failed to create refresh token", err, http.StatusInternalServerError, w)
+			return
+		}
+
 		respBody := okJSON{
-			Id:        userID.String(),
-			CreatedAt: usr.CreatedAt.String(),
-			UpdatedAt: usr.UpdatedAt.String(),
-			Email:     usr.Email,
-			Token:     token,
+			ID:           userID.String(),
+			CreatedAt:    usr.CreatedAt.String(),
+			UpdatedAt:    usr.UpdatedAt.String(),
+			Email:        usr.Email,
+			Token:        token,
+			RefreshToken: refreshToken,
 		}
 
 		sendJSON(http.StatusOK, w, respBody)
@@ -279,6 +287,68 @@ func (cfg *apiConfig) postLogin(w http.ResponseWriter, req *http.Request) {
 		err = errors.New("failed authentication")
 		apiError("authentication failed", "Authentication failed", err, http.StatusUnauthorized, w)
 	}
+}
+
+func (cfg *apiConfig) checkRefreshToken(w http.ResponseWriter, req *http.Request) {
+	ctx := req.Context()
+	db := cfg.db
+
+	type okJSON struct {
+		Token string `json:"token"`
+	}
+
+	authHeader := req.Header.Get("Authorization")
+	if authHeader == "" {
+		errMsg := errors.New("no refresh token found in header")
+		apiError("refhresh token Authorization header not found", "Authorization header not found", errMsg, http.StatusBadRequest, w)
+		return
+	}
+
+	bearer := strings.TrimPrefix(authHeader, "Bearer ")
+	rToken, err := db.GetRefreshToken(ctx, bearer)
+	if err != nil {
+		apiError("error retrieving refresh token", "Error retrieving refresh token", err, http.StatusUnauthorized, w)
+		return
+	}
+
+	if rToken.ExpiresAt.Before(time.Now()) || rToken.RevokedAt.Valid {
+		errMsg := errors.New("refresh token expired/revoked")
+		apiError("token expired/revoked", "Invliad refresh token", errMsg, http.StatusUnauthorized, w)
+		return
+	}
+
+	token, err := auth.MakeJWT(rToken.UserID, cfg.secret, time.Hour)
+	if err != nil {
+		apiError("failed to create jwt token", "Failed to generate JWT token", err, http.StatusInternalServerError, w)
+		return
+	}
+
+	respBody := okJSON{
+		Token: token,
+	}
+
+	sendJSON(http.StatusOK, w, respBody)
+}
+
+func (cfg *apiConfig) revokeRefreshToken(w http.ResponseWriter, req *http.Request) {
+	ctx := req.Context()
+	db := cfg.db
+
+	authHeader := req.Header.Get("Authorization")
+	if authHeader == "" {
+		errMsg := errors.New("no refresh token found in header")
+		apiError("refhresh token Authorization header not found", "Authorization header not found", errMsg, http.StatusBadRequest, w)
+		return
+	}
+
+	bearer := strings.TrimPrefix(authHeader, "Bearer ")
+	err := db.RevokeRefreshToken(ctx, bearer)
+	if err != nil {
+		apiError("error revoking refresh token", "Error revoking refresh token", err, http.StatusBadRequest, w)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (cfg *apiConfig) postChirps(w http.ResponseWriter, req *http.Request) {
@@ -450,6 +520,8 @@ func main() {
 	mux.HandleFunc("GET /api/healthz", healthz)
 	mux.HandleFunc("POST /api/users", apiCfg.postUsers)
 	mux.HandleFunc("POST /api/login", apiCfg.postLogin)
+	mux.HandleFunc("POST /api/refresh", apiCfg.checkRefreshToken)
+	mux.HandleFunc("POST /api/revoke", apiCfg.revokeRefreshToken)
 	mux.HandleFunc("POST /api/chirps", apiCfg.postChirps)
 	mux.HandleFunc("GET /api/chirps", apiCfg.getChirps)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.getChirp)
