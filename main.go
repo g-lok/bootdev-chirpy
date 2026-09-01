@@ -251,6 +251,44 @@ func (cfg *apiConfig) postChirps(w http.ResponseWriter, req *http.Request) {
 	sendJSON(http.StatusCreated, w, respBody)
 }
 
+func (cfg *apiConfig) getChirps(w http.ResponseWriter, req *http.Request) {
+	ctx := req.Context()
+	db := cfg.db
+
+	type chirpJSON struct {
+		Id        string `json:"id"`
+		CreatedAt string `json:"created_at"`
+		UpdatedAt string `json:"updated_at"`
+		Body      string `json:"body"`
+		UserID    string `json:"user_id"`
+	}
+
+	type chirpsList struct {
+		Data []chirpJSON `json:"data"`
+	}
+
+	chirps, err := db.GetChirps(ctx)
+	if err != nil {
+		apiError("error fetching chirps", "Error getting chirps", err, http.StatusInternalServerError, w)
+	}
+
+	var respJSON chirpsList
+
+	for _, chirp := range chirps {
+		chirpFormatted := chirpJSON{
+			Id:        chirp.ID.String(),
+			CreatedAt: chirp.CreatedAt.String(),
+			UpdatedAt: chirp.UpdatedAt.String(),
+			Body:      chirp.Body,
+			UserID:    chirp.UserID.String(),
+		}
+
+		respJSON.Data = append(respJSON.Data, chirpFormatted)
+	}
+
+	sendJSON(http.StatusOK, w, respJSON.Data)
+}
+
 func main() {
 	w := os.Stderr
 	logger := slog.New(tint.NewTextHandler(w, nil))
@@ -279,6 +317,7 @@ func main() {
 	mux.HandleFunc("GET /api/healthz", healthz)
 	mux.HandleFunc("POST /api/users", apiCfg.postUsers)
 	mux.HandleFunc("POST /api/chirps", apiCfg.postChirps)
+	mux.HandleFunc("GET /api/chirps", apiCfg.getChirps)
 
 	server := &http.Server{
 		Addr:    ":8080",
