@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"unicode"
 
+	"github.com/g-lok/bootdev-chirpy/internal/auth"
 	"github.com/g-lok/bootdev-chirpy/internal/database"
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
@@ -145,14 +146,16 @@ func (cfg *apiConfig) postUsers(w http.ResponseWriter, req *http.Request) {
 	db := cfg.db
 
 	type parameters struct {
-		Email string `json:"email"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
 	}
 
 	type okJSON struct {
-		Id        string `json:"id"`
-		CreatedAt string `json:"created_at"`
-		UpdatedAt string `json:"updated_at"`
-		Email     string `json:"email"`
+		Id             string `json:"id"`
+		CreatedAt      string `json:"created_at"`
+		UpdatedAt      string `json:"updated_at"`
+		Email          string `json:"email"`
+		HashedPassword string `json:"hashed_password"`
 	}
 
 	decoder := json.NewDecoder(req.Body)
@@ -174,7 +177,18 @@ func (cfg *apiConfig) postUsers(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	usr, err := db.CreateUser(ctx, params.Email)
+	hashedPassword, err := auth.HashPassword(params.Password)
+	if err != nil {
+		apiError("failed to hash password", "Error processing password", err, http.StatusInternalServerError, w)
+		return
+	}
+
+	newUserParams := database.CreateUserParams{
+		Email:          params.Email,
+		HashedPassword: hashedPassword,
+	}
+
+	usr, err := db.CreateUser(ctx, newUserParams)
 	if err != nil {
 		apiError("error adding new user", "Error adding new user", err, http.StatusInternalServerError, w)
 		return
@@ -188,6 +202,57 @@ func (cfg *apiConfig) postUsers(w http.ResponseWriter, req *http.Request) {
 	}
 
 	sendJSON(http.StatusCreated, w, respBody)
+}
+
+func (cfg *apiConfig) postLogin(w http.ResponseWriter, req *http.Request) {
+	ctx := req.Context()
+	db := cfg.db
+
+	type parameters struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+
+	type okJSON struct {
+		Id        string `json:"id"`
+		CreatedAt string `json:"created_at"`
+		UpdatedAt string `json:"updated_at"`
+		Email     string `json:"email"`
+	}
+
+	decoder := json.NewDecoder(req.Body)
+	params := parameters{}
+	err := decoder.Decode(&params)
+	if err != nil {
+		apiError("error decoding parameters", "Error decoding JSON parameter", err, http.StatusInternalServerError, w)
+		return
+	}
+
+	usr, err := db.GetUserByEmail(ctx, params.Email)
+	if err != nil {
+		apiError("failed to get user", "Failed to get user", err, http.StatusNotFound, w)
+		return
+	}
+
+	checkPassword, err := auth.CheckHashedPassword(params.Password, usr.HashedPassword)
+	if err != nil {
+		apiError("failed to check password", "Failed to check password", err, http.StatusInternalServerError, w)
+		return
+	}
+
+	if checkPassword {
+		respBody := okJSON{
+			Id:        usr.ID.String(),
+			CreatedAt: usr.CreatedAt.String(),
+			UpdatedAt: usr.UpdatedAt.String(),
+			Email:     usr.Email,
+		}
+
+		sendJSON(http.StatusOK, w, respBody)
+	} else {
+		err = errors.New("failed password authentication")
+		apiError("wrong password", "Wrong password", err, http.StatusUnauthorized, w)
+	}
 }
 
 func (cfg *apiConfig) postChirps(w http.ResponseWriter, req *http.Request) {
@@ -352,6 +417,7 @@ func main() {
 	mux.HandleFunc("POST /admin/reset", apiCfg.reset)
 	mux.HandleFunc("GET /api/healthz", healthz)
 	mux.HandleFunc("POST /api/users", apiCfg.postUsers)
+	mux.HandleFunc("POST /api/login", apiCfg.postLogin)
 	mux.HandleFunc("POST /api/chirps", apiCfg.postChirps)
 	mux.HandleFunc("GET /api/chirps", apiCfg.getChirps)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.getChirp)
