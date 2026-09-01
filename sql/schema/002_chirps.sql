@@ -3,7 +3,7 @@ CREATE TABLE chirps (
   id UUID PRIMARY KEY,
   created_at TIMESTAMP NOT NULL,
   updated_at TIMESTAMP NOT NULL,
-  body VARCHAR(140) NOT NULL UNIQUE,
+  body VARCHAR(140) NOT NULL,
   user_id UUID NOT NULL,
   CONSTRAINT fk_chirps_userid
     FOREIGN KEY (user_id)
