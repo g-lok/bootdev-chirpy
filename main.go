@@ -58,7 +58,7 @@ func apiError(logMsg string, apiMsg string, err error, code int, w http.Response
 
 	slog.Error(logMsg, "error", err)
 	respBody := errJSON{
-		Error: fmt.Sprintf(apiMsg, err),
+		Error: fmt.Sprintf("%s: %v", apiMsg, err),
 	}
 
 	sendJSON(code, w, respBody)
@@ -270,6 +270,7 @@ func (cfg *apiConfig) getChirps(w http.ResponseWriter, req *http.Request) {
 	chirps, err := db.GetChirps(ctx)
 	if err != nil {
 		apiError("error fetching chirps", "Error getting chirps", err, http.StatusInternalServerError, w)
+		return
 	}
 
 	var respJSON chirpsList
@@ -287,6 +288,41 @@ func (cfg *apiConfig) getChirps(w http.ResponseWriter, req *http.Request) {
 	}
 
 	sendJSON(http.StatusOK, w, respJSON.Data)
+}
+
+func (cfg *apiConfig) getChirp(w http.ResponseWriter, req *http.Request) {
+	ctx := req.Context()
+	db := cfg.db
+
+	type chirpJSON struct {
+		Id        string `json:"id"`
+		CreatedAt string `json:"created_at"`
+		UpdatedAt string `json:"updated_at"`
+		Body      string `json:"body"`
+		UserID    string `json:"user_id"`
+	}
+
+	chirpID, err := uuid.Parse(req.PathValue("chirpID"))
+	if err != nil {
+		apiError("invlaid chirpID uuid", "Invalid chirpID uuid", err, http.StatusBadRequest, w)
+		return
+	}
+
+	chirp, err := db.GetChirp(ctx, chirpID)
+	if err != nil {
+		apiError("error fetching chirp", "Error getting chirp", err, http.StatusNotFound, w)
+		return
+	}
+
+	respJSON := chirpJSON{
+		Id:        chirp.ID.String(),
+		CreatedAt: chirp.CreatedAt.String(),
+		UpdatedAt: chirp.UpdatedAt.String(),
+		Body:      chirp.Body,
+		UserID:    chirp.UserID.String(),
+	}
+
+	sendJSON(http.StatusOK, w, respJSON)
 }
 
 func main() {
@@ -318,6 +354,7 @@ func main() {
 	mux.HandleFunc("POST /api/users", apiCfg.postUsers)
 	mux.HandleFunc("POST /api/chirps", apiCfg.postChirps)
 	mux.HandleFunc("GET /api/chirps", apiCfg.getChirps)
+	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.getChirp)
 
 	server := &http.Server{
 		Addr:    ":8080",
