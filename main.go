@@ -553,6 +553,57 @@ func (cfg *apiConfig) getChirp(w http.ResponseWriter, req *http.Request) {
 	sendJSON(http.StatusOK, w, respJSON)
 }
 
+func (cfg *apiConfig) deleteChirp(w http.ResponseWriter, req *http.Request) {
+	ctx := req.Context()
+	db := cfg.db
+
+	type chirpJSON struct {
+		Id        string `json:"id"`
+		CreatedAt string `json:"created_at"`
+		UpdatedAt string `json:"updated_at"`
+		Body      string `json:"body"`
+		UserID    string `json:"user_id"`
+	}
+
+	bearerToken, err := auth.GetBearerToken(req.Header)
+	if err != nil {
+		apiError("failed to get bearer token", "Failed to get bearer token", err, http.StatusUnauthorized, w)
+		return
+	}
+
+	userID, err := auth.ValidateJWT(bearerToken, cfg.secret)
+	if err != nil {
+		apiError("failed to authorize bearer token", "Failed authentication", err, http.StatusUnauthorized, w)
+		return
+	}
+
+	chirpID, err := uuid.Parse(req.PathValue("chirpID"))
+	if err != nil {
+		apiError("invlaid chirpID uuid", "Invalid chirpID uuid", err, http.StatusBadRequest, w)
+		return
+	}
+
+	chirp, err := db.GetChirp(ctx, chirpID)
+	if err != nil {
+		apiError("error fetching chirp", "Error getting chirp", err, http.StatusNotFound, w)
+		return
+	}
+
+	if chirp.UserID != userID {
+		errMsg := errors.New("user not authorized to delete chirp")
+		apiError("user not authorized to delete chirp", "User not authorized to delete chirp", errMsg, http.StatusForbidden, w)
+		return
+	}
+
+	err = db.DeleteChirp(ctx, chirpID)
+	if err != nil {
+		apiError("failed to delete chirp", "Failed to delete chirp", err, http.StatusInternalServerError, w)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func main() {
 	w := os.Stderr
 	logger := slog.New(tint.NewTextHandler(w, nil))
@@ -588,6 +639,7 @@ func main() {
 	mux.HandleFunc("POST /api/chirps", apiCfg.postChirps)
 	mux.HandleFunc("GET /api/chirps", apiCfg.getChirps)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.getChirp)
+	mux.HandleFunc("DELETE /api/chirps/{chirpID}", apiCfg.deleteChirp)
 
 	server := &http.Server{
 		Addr:    ":8080",
