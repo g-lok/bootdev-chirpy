@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -28,6 +29,7 @@ type apiConfig struct {
 	db             *database.Queries
 	platform       string
 	secret         string
+	polkaKey       string
 }
 
 func sendJSON[T any](code int, w http.ResponseWriter, payload T) {
@@ -153,11 +155,11 @@ func (cfg *apiConfig) postUsers(w http.ResponseWriter, req *http.Request) {
 	}
 
 	type okJSON struct {
-		Id             string `json:"id"`
-		CreatedAt      string `json:"created_at"`
-		UpdatedAt      string `json:"updated_at"`
-		Email          string `json:"email"`
-		HashedPassword string `json:"hashed_password"`
+		Id          string `json:"id"`
+		CreatedAt   string `json:"created_at"`
+		UpdatedAt   string `json:"updated_at"`
+		Email       string `json:"email"`
+		IsChirpyRed bool   `json:"is_chirpy_red"`
 	}
 
 	decoder := json.NewDecoder(req.Body)
@@ -197,10 +199,11 @@ func (cfg *apiConfig) postUsers(w http.ResponseWriter, req *http.Request) {
 	}
 
 	respBody := okJSON{
-		Id:        usr.ID.String(),
-		CreatedAt: usr.CreatedAt.String(),
-		UpdatedAt: usr.UpdatedAt.String(),
-		Email:     usr.Email,
+		Id:          usr.ID.String(),
+		CreatedAt:   usr.CreatedAt.String(),
+		UpdatedAt:   usr.UpdatedAt.String(),
+		Email:       usr.Email,
+		IsChirpyRed: usr.IsChirpyRed.Bool,
 	}
 
 	sendJSON(http.StatusCreated, w, respBody)
@@ -216,10 +219,11 @@ func (cfg *apiConfig) putUsers(w http.ResponseWriter, req *http.Request) {
 	}
 
 	type okJSON struct {
-		ID        string `json:"id"`
-		CreatedAt string `json:"created_at"`
-		UpdatedAt string `json:"updated_at"`
-		Email     string `json:"email"`
+		ID          string `json:"id"`
+		CreatedAt   string `json:"created_at"`
+		UpdatedAt   string `json:"updated_at"`
+		Email       string `json:"email"`
+		IsChirpyRed bool   `json:"is_chirpy_red"`
 	}
 
 	decoder := json.NewDecoder(req.Body)
@@ -259,13 +263,66 @@ func (cfg *apiConfig) putUsers(w http.ResponseWriter, req *http.Request) {
 	}
 
 	respBody := okJSON{
-		ID:        updatedUsr.ID.String(),
-		Email:     updatedUsr.Email,
-		CreatedAt: updatedUsr.CreatedAt.String(),
-		UpdatedAt: updatedUsr.UpdatedAt.String(),
+		ID:          updatedUsr.ID.String(),
+		Email:       updatedUsr.Email,
+		CreatedAt:   updatedUsr.CreatedAt.String(),
+		UpdatedAt:   updatedUsr.UpdatedAt.String(),
+		IsChirpyRed: updatedUsr.IsChirpyRed.Bool,
 	}
 
 	sendJSON(http.StatusOK, w, respBody)
+}
+
+func (cfg *apiConfig) postPolkaWebhook(w http.ResponseWriter, req *http.Request) {
+	ctx := req.Context()
+	db := cfg.db
+
+	type dataParameter struct {
+		UserID string `json:"user_id"`
+	}
+
+	type parameters struct {
+		Event string        `json:"event"`
+		Data  dataParameter `json:"data"`
+	}
+
+	decoder := json.NewDecoder(req.Body)
+	params := parameters{}
+	err := decoder.Decode(&params)
+	if err != nil {
+		simpleError("failed to parse request json", http.StatusInternalServerError, w)
+		return
+	}
+
+	apiKey, err := auth.GetAPIKey(req.Header)
+	if err != nil {
+		simpleError("failed to get API key", http.StatusUnauthorized, w)
+		return
+	}
+
+	if apiKey != cfg.polkaKey {
+		simpleError("webhook api key mismatch", http.StatusUnauthorized, w)
+		return
+	}
+
+	if params.Event != "user.upgraded" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	userID, err := uuid.Parse(params.Data.UserID)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	err = db.UpdateUserRed(ctx, userID)
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (cfg *apiConfig) postLogin(w http.ResponseWriter, req *http.Request) {
@@ -284,6 +341,7 @@ func (cfg *apiConfig) postLogin(w http.ResponseWriter, req *http.Request) {
 		Email        string `json:"email"`
 		Token        string `json:"token"`
 		RefreshToken string `json:"refresh_token"`
+		IsChirpyRed  bool   `json:"is_chirpy_red"`
 	}
 
 	decoder := json.NewDecoder(req.Body)
@@ -342,6 +400,7 @@ func (cfg *apiConfig) postLogin(w http.ResponseWriter, req *http.Request) {
 			Email:        usr.Email,
 			Token:        token,
 			RefreshToken: refreshToken,
+			IsChirpyRed:  usr.IsChirpyRed.Bool,
 		}
 
 		sendJSON(http.StatusOK, w, respBody)
@@ -362,7 +421,7 @@ func (cfg *apiConfig) checkRefreshToken(w http.ResponseWriter, req *http.Request
 	authHeader := req.Header.Get("Authorization")
 	if authHeader == "" {
 		errMsg := errors.New("no refresh token found in header")
-		apiError("refhresh token Authorization header not found", "Authorization header not found", errMsg, http.StatusBadRequest, w)
+		apiError("refresh token Authorization header not found", "Authorization header not found", errMsg, http.StatusBadRequest, w)
 		return
 	}
 
@@ -483,8 +542,11 @@ func (cfg *apiConfig) getChirps(w http.ResponseWriter, req *http.Request) {
 	ctx := req.Context()
 	db := cfg.db
 
+	authID := req.URL.Query().Get("author_id")
+	sortOrder := req.URL.Query().Get("sort")
+
 	type chirpJSON struct {
-		Id        string `json:"id"`
+		ID        string `json:"id"`
 		CreatedAt string `json:"created_at"`
 		UpdatedAt string `json:"updated_at"`
 		Body      string `json:"body"`
@@ -495,23 +557,64 @@ func (cfg *apiConfig) getChirps(w http.ResponseWriter, req *http.Request) {
 		Data []chirpJSON `json:"data"`
 	}
 
-	chirps, err := db.GetChirps(ctx)
-	if err != nil {
-		apiError("error fetching chirps", "Error getting chirps", err, http.StatusInternalServerError, w)
-		return
+	var chirps []database.Chirp
+	var err error
+	if authID == "" {
+		chirps, err = db.GetChirps(ctx)
+		if err != nil {
+			apiError("error fetching chirps", "Error getting chirps", err, http.StatusInternalServerError, w)
+			return
+		}
+	} else {
+		authUUID, err := uuid.Parse(authID)
+		if err != nil {
+			apiError("invalid UUID provided for author_id", "Invalid author_id: must be UUID", err, http.StatusBadRequest, w)
+			return
+		}
+		usr, err := db.UserExistsByID(ctx, authUUID)
+		if err != nil {
+			apiError("failed to check user_id", "Failed to query author_id", err, http.StatusInternalServerError, w)
+			return
+		}
+		if usr {
+			chirps, err = db.GetChirpsByAuthor(ctx, authUUID)
+			if err != nil {
+				apiError("error fetching chirps", "Error getting chirps", err, http.StatusInternalServerError, w)
+				return
+			}
+		} else {
+			errMsg := errors.New("no user with that author_id found")
+			apiError("no author found", "Failed to find author_id", errMsg, http.StatusNotFound, w)
+			return
+		}
+	}
+
+	sortAsc := func(i, j int) bool {
+		return chirps[i].CreatedAt.Before(chirps[j].CreatedAt)
+	}
+
+	sortDesc := func(i, j int) bool {
+		return chirps[i].CreatedAt.After(chirps[j].CreatedAt)
+	}
+
+	if sortOrder != "" {
+		if sortOrder == "asc" {
+			sort.Slice(chirps, sortAsc)
+		} else if sortOrder == "desc" {
+			sort.Slice(chirps, sortDesc)
+		}
 	}
 
 	var respJSON chirpsList
 
 	for _, chirp := range chirps {
 		chirpFormatted := chirpJSON{
-			Id:        chirp.ID.String(),
+			ID:        chirp.ID.String(),
 			CreatedAt: chirp.CreatedAt.String(),
 			UpdatedAt: chirp.UpdatedAt.String(),
 			Body:      chirp.Body,
 			UserID:    chirp.UserID.String(),
 		}
-
 		respJSON.Data = append(respJSON.Data, chirpFormatted)
 	}
 
@@ -623,6 +726,7 @@ func main() {
 	apiCfg.db = dbQueries
 	apiCfg.platform = os.Getenv("PLATFORM")
 	apiCfg.secret = os.Getenv("SECRET")
+	apiCfg.polkaKey = os.Getenv("POLKA_KEY")
 
 	mux := http.NewServeMux()
 	fs := http.FileServer(http.Dir("./static"))
@@ -640,6 +744,7 @@ func main() {
 	mux.HandleFunc("GET /api/chirps", apiCfg.getChirps)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.getChirp)
 	mux.HandleFunc("DELETE /api/chirps/{chirpID}", apiCfg.deleteChirp)
+	mux.HandleFunc("POST /api/polka/webhooks", apiCfg.postPolkaWebhook)
 
 	server := &http.Server{
 		Addr:    ":8080",
