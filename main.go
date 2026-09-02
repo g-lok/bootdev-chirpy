@@ -541,6 +541,8 @@ func (cfg *apiConfig) getChirps(w http.ResponseWriter, req *http.Request) {
 	ctx := req.Context()
 	db := cfg.db
 
+	authID := req.URL.Query().Get("author_id")
+
 	type chirpJSON struct {
 		Id        string `json:"id"`
 		CreatedAt string `json:"created_at"`
@@ -553,10 +555,36 @@ func (cfg *apiConfig) getChirps(w http.ResponseWriter, req *http.Request) {
 		Data []chirpJSON `json:"data"`
 	}
 
-	chirps, err := db.GetChirps(ctx)
-	if err != nil {
-		apiError("error fetching chirps", "Error getting chirps", err, http.StatusInternalServerError, w)
-		return
+	var chirps []database.Chirp
+	var err error
+	if authID == "" {
+		chirps, err = db.GetChirps(ctx)
+		if err != nil {
+			apiError("error fetching chirps", "Error getting chirps", err, http.StatusInternalServerError, w)
+			return
+		}
+	} else {
+		authUUID, err := uuid.Parse(authID)
+		if err != nil {
+			apiError("invalid UUID provided for author_id", "Invalid author_id: must be UUID", err, http.StatusBadRequest, w)
+			return
+		}
+		usr, err := db.UserExistsByID(ctx, authUUID)
+		if err != nil {
+			apiError("failed to check user_id", "Failed to query author_id", err, http.StatusInternalServerError, w)
+			return
+		}
+		if usr {
+			chirps, err = db.GetChirpsByAuthor(ctx, authUUID)
+			if err != nil {
+				apiError("error fetching chirps", "Error getting chirps", err, http.StatusInternalServerError, w)
+				return
+			}
+		} else {
+			errMsg := errors.New("no user with that author_id found")
+			apiError("no author found", "Failed to find author_id", errMsg, http.StatusNotFound, w)
+			return
+		}
 	}
 
 	var respJSON chirpsList
