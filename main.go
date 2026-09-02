@@ -28,6 +28,7 @@ type apiConfig struct {
 	db             *database.Queries
 	platform       string
 	secret         string
+	polkaKey       string
 }
 
 func sendJSON[T any](code int, w http.ResponseWriter, payload T) {
@@ -271,7 +272,7 @@ func (cfg *apiConfig) putUsers(w http.ResponseWriter, req *http.Request) {
 	sendJSON(http.StatusOK, w, respBody)
 }
 
-func (cfg *apiConfig) postPolkaWebhooks(w http.ResponseWriter, req *http.Request) {
+func (cfg *apiConfig) postPolkaWebhook(w http.ResponseWriter, req *http.Request) {
 	ctx := req.Context()
 	db := cfg.db
 
@@ -288,7 +289,18 @@ func (cfg *apiConfig) postPolkaWebhooks(w http.ResponseWriter, req *http.Request
 	params := parameters{}
 	err := decoder.Decode(&params)
 	if err != nil {
-		apiError("error decoding parameters", "Error decoding JSON parameter", err, http.StatusInternalServerError, w)
+		simpleError("failed to parse request json", http.StatusInternalServerError, w)
+		return
+	}
+
+	apiKey, err := auth.GetAPIKey(req.Header)
+	if err != nil {
+		simpleError("failed to get API key", http.StatusUnauthorized, w)
+		return
+	}
+
+	if apiKey != cfg.polkaKey {
+		simpleError("webhook api key mismatch", http.StatusUnauthorized, w)
 		return
 	}
 
@@ -669,6 +681,7 @@ func main() {
 	apiCfg.db = dbQueries
 	apiCfg.platform = os.Getenv("PLATFORM")
 	apiCfg.secret = os.Getenv("SECRET")
+	apiCfg.polkaKey = os.Getenv("POLKA_KEY")
 
 	mux := http.NewServeMux()
 	fs := http.FileServer(http.Dir("./static"))
@@ -686,7 +699,7 @@ func main() {
 	mux.HandleFunc("GET /api/chirps", apiCfg.getChirps)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.getChirp)
 	mux.HandleFunc("DELETE /api/chirps/{chirpID}", apiCfg.deleteChirp)
-	mux.HandleFunc("POST /api/polka/webhooks", apiCfg.postPolkaWebhooks)
+	mux.HandleFunc("POST /api/polka/webhooks", apiCfg.postPolkaWebhook)
 
 	server := &http.Server{
 		Addr:    ":8080",
