@@ -206,6 +206,68 @@ func (cfg *apiConfig) postUsers(w http.ResponseWriter, req *http.Request) {
 	sendJSON(http.StatusCreated, w, respBody)
 }
 
+func (cfg *apiConfig) putUsers(w http.ResponseWriter, req *http.Request) {
+	ctx := req.Context()
+	db := cfg.db
+
+	type parameters struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+
+	type okJSON struct {
+		ID        string `json:"id"`
+		CreatedAt string `json:"created_at"`
+		UpdatedAt string `json:"updated_at"`
+		Email     string `json:"email"`
+	}
+
+	decoder := json.NewDecoder(req.Body)
+	params := parameters{}
+	err := decoder.Decode(&params)
+	if err != nil {
+		apiError("error decoding parameters", "Error decoding JSON parameter", err, http.StatusInternalServerError, w)
+		return
+	}
+
+	bearerToken, err := auth.GetBearerToken(req.Header)
+	if err != nil {
+		apiError("failed to get bearer token", "Failed to get bearer token", err, http.StatusUnauthorized, w)
+		return
+	}
+
+	userID, err := auth.ValidateJWT(bearerToken, cfg.secret)
+	if err != nil {
+		apiError("failed to authorize bearer token", "Failed authentication", err, http.StatusUnauthorized, w)
+		return
+	}
+
+	hashedPassword, err := auth.HashPassword(params.Password)
+	if err != nil {
+		apiError("failed to hash password", "Error processing password", err, http.StatusInternalServerError, w)
+		return
+	}
+
+	putUserParams := database.PutUserParams{
+		ID:             userID,
+		Email:          params.Email,
+		HashedPassword: hashedPassword,
+	}
+	updatedUsr, err := db.PutUser(ctx, putUserParams)
+	if err != nil {
+		apiError("failed to update user", "Failed to update user", err, http.StatusInternalServerError, w)
+	}
+
+	respBody := okJSON{
+		ID:        updatedUsr.ID.String(),
+		Email:     updatedUsr.Email,
+		CreatedAt: updatedUsr.CreatedAt.String(),
+		UpdatedAt: updatedUsr.UpdatedAt.String(),
+	}
+
+	sendJSON(http.StatusOK, w, respBody)
+}
+
 func (cfg *apiConfig) postLogin(w http.ResponseWriter, req *http.Request) {
 	ctx := req.Context()
 	db := cfg.db
@@ -519,6 +581,7 @@ func main() {
 	mux.HandleFunc("POST /admin/reset", apiCfg.reset)
 	mux.HandleFunc("GET /api/healthz", healthz)
 	mux.HandleFunc("POST /api/users", apiCfg.postUsers)
+	mux.HandleFunc("PUT /api/users", apiCfg.putUsers)
 	mux.HandleFunc("POST /api/login", apiCfg.postLogin)
 	mux.HandleFunc("POST /api/refresh", apiCfg.checkRefreshToken)
 	mux.HandleFunc("POST /api/revoke", apiCfg.revokeRefreshToken)
