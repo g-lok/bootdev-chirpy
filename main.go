@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -420,7 +421,7 @@ func (cfg *apiConfig) checkRefreshToken(w http.ResponseWriter, req *http.Request
 	authHeader := req.Header.Get("Authorization")
 	if authHeader == "" {
 		errMsg := errors.New("no refresh token found in header")
-		apiError("refhresh token Authorization header not found", "Authorization header not found", errMsg, http.StatusBadRequest, w)
+		apiError("refresh token Authorization header not found", "Authorization header not found", errMsg, http.StatusBadRequest, w)
 		return
 	}
 
@@ -542,9 +543,10 @@ func (cfg *apiConfig) getChirps(w http.ResponseWriter, req *http.Request) {
 	db := cfg.db
 
 	authID := req.URL.Query().Get("author_id")
+	sortOrder := req.URL.Query().Get("sort")
 
 	type chirpJSON struct {
-		Id        string `json:"id"`
+		ID        string `json:"id"`
 		CreatedAt string `json:"created_at"`
 		UpdatedAt string `json:"updated_at"`
 		Body      string `json:"body"`
@@ -587,17 +589,32 @@ func (cfg *apiConfig) getChirps(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 
+	sortAsc := func(i, j int) bool {
+		return chirps[i].CreatedAt.Before(chirps[j].CreatedAt)
+	}
+
+	sortDesc := func(i, j int) bool {
+		return chirps[i].CreatedAt.After(chirps[j].CreatedAt)
+	}
+
+	if sortOrder != "" {
+		if sortOrder == "asc" {
+			sort.Slice(chirps, sortAsc)
+		} else if sortOrder == "desc" {
+			sort.Slice(chirps, sortDesc)
+		}
+	}
+
 	var respJSON chirpsList
 
 	for _, chirp := range chirps {
 		chirpFormatted := chirpJSON{
-			Id:        chirp.ID.String(),
+			ID:        chirp.ID.String(),
 			CreatedAt: chirp.CreatedAt.String(),
 			UpdatedAt: chirp.UpdatedAt.String(),
 			Body:      chirp.Body,
 			UserID:    chirp.UserID.String(),
 		}
-
 		respJSON.Data = append(respJSON.Data, chirpFormatted)
 	}
 
