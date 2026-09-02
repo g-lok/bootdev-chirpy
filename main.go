@@ -153,11 +153,11 @@ func (cfg *apiConfig) postUsers(w http.ResponseWriter, req *http.Request) {
 	}
 
 	type okJSON struct {
-		Id             string `json:"id"`
-		CreatedAt      string `json:"created_at"`
-		UpdatedAt      string `json:"updated_at"`
-		Email          string `json:"email"`
-		HashedPassword string `json:"hashed_password"`
+		Id          string `json:"id"`
+		CreatedAt   string `json:"created_at"`
+		UpdatedAt   string `json:"updated_at"`
+		Email       string `json:"email"`
+		IsChirpyRed bool   `json:"is_chirpy_red"`
 	}
 
 	decoder := json.NewDecoder(req.Body)
@@ -197,10 +197,11 @@ func (cfg *apiConfig) postUsers(w http.ResponseWriter, req *http.Request) {
 	}
 
 	respBody := okJSON{
-		Id:        usr.ID.String(),
-		CreatedAt: usr.CreatedAt.String(),
-		UpdatedAt: usr.UpdatedAt.String(),
-		Email:     usr.Email,
+		Id:          usr.ID.String(),
+		CreatedAt:   usr.CreatedAt.String(),
+		UpdatedAt:   usr.UpdatedAt.String(),
+		Email:       usr.Email,
+		IsChirpyRed: usr.IsChirpyRed.Bool,
 	}
 
 	sendJSON(http.StatusCreated, w, respBody)
@@ -216,10 +217,11 @@ func (cfg *apiConfig) putUsers(w http.ResponseWriter, req *http.Request) {
 	}
 
 	type okJSON struct {
-		ID        string `json:"id"`
-		CreatedAt string `json:"created_at"`
-		UpdatedAt string `json:"updated_at"`
-		Email     string `json:"email"`
+		ID          string `json:"id"`
+		CreatedAt   string `json:"created_at"`
+		UpdatedAt   string `json:"updated_at"`
+		Email       string `json:"email"`
+		IsChirpyRed bool   `json:"is_chirpy_red"`
 	}
 
 	decoder := json.NewDecoder(req.Body)
@@ -259,13 +261,55 @@ func (cfg *apiConfig) putUsers(w http.ResponseWriter, req *http.Request) {
 	}
 
 	respBody := okJSON{
-		ID:        updatedUsr.ID.String(),
-		Email:     updatedUsr.Email,
-		CreatedAt: updatedUsr.CreatedAt.String(),
-		UpdatedAt: updatedUsr.UpdatedAt.String(),
+		ID:          updatedUsr.ID.String(),
+		Email:       updatedUsr.Email,
+		CreatedAt:   updatedUsr.CreatedAt.String(),
+		UpdatedAt:   updatedUsr.UpdatedAt.String(),
+		IsChirpyRed: updatedUsr.IsChirpyRed.Bool,
 	}
 
 	sendJSON(http.StatusOK, w, respBody)
+}
+
+func (cfg *apiConfig) postPolkaWebhooks(w http.ResponseWriter, req *http.Request) {
+	ctx := req.Context()
+	db := cfg.db
+
+	type dataParameter struct {
+		UserID string `json:"user_id"`
+	}
+
+	type parameters struct {
+		Event string        `json:"event"`
+		Data  dataParameter `json:"data"`
+	}
+
+	decoder := json.NewDecoder(req.Body)
+	params := parameters{}
+	err := decoder.Decode(&params)
+	if err != nil {
+		apiError("error decoding parameters", "Error decoding JSON parameter", err, http.StatusInternalServerError, w)
+		return
+	}
+
+	if params.Event != "user.upgraded" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	userID, err := uuid.Parse(params.Data.UserID)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	err = db.UpdateUserRed(ctx, userID)
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (cfg *apiConfig) postLogin(w http.ResponseWriter, req *http.Request) {
@@ -284,6 +328,7 @@ func (cfg *apiConfig) postLogin(w http.ResponseWriter, req *http.Request) {
 		Email        string `json:"email"`
 		Token        string `json:"token"`
 		RefreshToken string `json:"refresh_token"`
+		IsChirpyRed  bool   `json:"is_chirpy_red"`
 	}
 
 	decoder := json.NewDecoder(req.Body)
@@ -342,6 +387,7 @@ func (cfg *apiConfig) postLogin(w http.ResponseWriter, req *http.Request) {
 			Email:        usr.Email,
 			Token:        token,
 			RefreshToken: refreshToken,
+			IsChirpyRed:  usr.IsChirpyRed.Bool,
 		}
 
 		sendJSON(http.StatusOK, w, respBody)
@@ -640,6 +686,7 @@ func main() {
 	mux.HandleFunc("GET /api/chirps", apiCfg.getChirps)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.getChirp)
 	mux.HandleFunc("DELETE /api/chirps/{chirpID}", apiCfg.deleteChirp)
+	mux.HandleFunc("POST /api/polka/webhooks", apiCfg.postPolkaWebhooks)
 
 	server := &http.Server{
 		Addr:    ":8080",
